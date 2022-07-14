@@ -4,7 +4,7 @@ import { TestUtils } from '@fuel-ts/wallet';
 
 import Contract from '../contracts/contract';
 
-import { setup } from './call-test-contract/call-test-contract.test';
+import { setup } from './call-test-contract/setup';
 
 const jsonFragment = {
   type: 'function',
