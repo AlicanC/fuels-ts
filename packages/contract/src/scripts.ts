@@ -1,10 +1,14 @@
+/* eslint-disable no-restricted-syntax */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { BytesLike } from '@ethersproject/bytes';
 import { arrayify, concat } from '@ethersproject/bytes';
 import type { ArrayCoder, StructCoder } from '@fuel-ts/abi-coder';
 import { AbiCoder, NumberCoder } from '@fuel-ts/abi-coder';
-import { NativeAssetId } from '@fuel-ts/constants';
 import type { BigNumberish } from '@fuel-ts/math';
+import type {
+  TransactionResultReturnDataReceipt,
+  TransactionResultReturnReceipt,
+} from '@fuel-ts/providers';
 import { ReceiptType } from '@fuel-ts/providers';
 import { Script } from '@fuel-ts/script';
 
@@ -89,24 +93,32 @@ export const contractCallScript = new Script<ContractCall[], Uint8Array[]>(
     if (result.code !== 0n) {
       throw new Error(`Script returned non-zero result: ${result.code}`);
     }
-    if (result.returnReceipt.type !== ReceiptType.ReturnData) {
-      throw new Error(`Expected returnReceipt to be a ReturnDataReceipt`);
+    if (result.returnReceipt.type === ReceiptType.Revert) {
+      throw new Error(`Expected returnReceipt not to be a RevertReceipt`);
     }
-    const encodedScriptReturn = arrayify(result.returnReceipt.data);
-    const outputs = contractCallScriptAbi[0].outputs;
-    const scriptDataCoder = new AbiCoder().getCoder(outputs[0]) as StructCoder<any>;
-    const [scriptReturn, scriptReturnLength] = scriptDataCoder.decode(encodedScriptReturn, 0);
-    const returnData = encodedScriptReturn.slice(scriptReturnLength);
+
+    let depth = 0;
+    const returnReceipts: Array<
+      TransactionResultReturnReceipt | TransactionResultReturnDataReceipt
+    > = [];
+    for (const receipt of result.receipts) {
+      if (receipt.type === ReceiptType.Call) {
+        depth += 1;
+      }
+      if (receipt.type === ReceiptType.Return || receipt.type === ReceiptType.ReturnData) {
+        depth -= 1;
+        if (depth === 0) {
+          returnReceipts.push(receipt);
+        }
+      }
+    }
 
     const contractCallResults: any[] = [];
-    (scriptReturn.call_returns as any[]).forEach((callResult, i) => {
-      if (callResult.Some) {
-        if (callResult.Some.Data) {
-          const [offset, length] = callResult.Some.Data;
-          contractCallResults[i] = returnData.slice(Number(offset), Number(offset + length));
-        } else {
-          contractCallResults[i] = new NumberCoder('u64').encode(callResult.Some.Value);
-        }
+    returnReceipts.forEach((receipt, i) => {
+      if (receipt.type === ReceiptType.ReturnData) {
+        contractCallResults[i] = receipt.data;
+      } else {
+        contractCallResults[i] = new NumberCoder('u64').encode(receipt.val);
       }
     });
 

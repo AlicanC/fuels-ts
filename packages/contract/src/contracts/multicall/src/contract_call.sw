@@ -5,14 +5,36 @@ use std::{
     constants::BASE_ASSET_ID,
     context::registers::{context_gas, return_length, return_value},
     contract_id::ContractId,
+    intrinsics::size_of,
+    mem::{addr_of, copy, read},
     option::Option,
+    vec::Vec,
 };
+
+fn buf_addr_of_vec<T>(vec: Vec<T>) -> u64 {
+    read(addr_of(vec))
+}
+
+fn mem_to_vec(ptr: u64, len: u64) -> Vec<u64> {
+    // Calculate capacity, with padding if needed
+    let item_len = size_of::<u64>();
+    let pad = len % item_len;
+    let cap = (len + pad) / item_len;
+
+    // Allocate a vec
+    let vec: Vec<u64> = ~Vec::with_capacity(cap);
+
+    // Copy from memory to vec
+    let vec_buf_ptr: u64 = buf_addr_of_vec(vec);
+    copy(ptr, vec_buf_ptr, len);
+
+    vec
+}
 
 /// A value passed to or returned from a contract function.
 pub enum CallValue {
     Value: u64,
-    Data: (u64,
-    u64), 
+    Data: Vec<u64>,
 }
 
 /// Arguments passed to the CALL instruction.
@@ -36,7 +58,7 @@ impl CallParameters {
 pub fn call_contract(id: ContractId, fn_selector: u64, fn_arg: CallValue, call_parameters: CallParameters) -> CallValue {
     // Prepare the data for the call
     let fn_arg = match fn_arg {
-        CallValue::Value(val) => val, CallValue::Data((ptr, _)) => ptr, 
+        CallValue::Value(val) => val, CallValue::Data(vec) => buf_addr_of_vec(vec), 
     };
     let call_data = (id, fn_selector, fn_arg);
     let amount = match call_parameters.amount {
@@ -66,7 +88,16 @@ pub fn call_contract(id: ContractId, fn_selector: u64, fn_arg: CallValue, call_p
         // A reference type was returned with a RETD instruction
         len => {
             let ptr = return_value();
-            CallValue::Data((ptr, len))
+
+            // Copy the return data to a new vec, padding it if necessary
+            let item_len = size_of::<u64>();
+            let pad = len % item_len;
+            let cap = (len + pad) / item_len;
+            let vec: Vec<u64> = ~Vec::with_capacity(cap);
+            let vec_buf_ptr: u64 = read(addr_of(vec));
+            copy(ptr, vec_buf_ptr, len);
+
+            CallValue::Data(vec)
         },
     }
 }

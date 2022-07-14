@@ -10,16 +10,9 @@ use std::mem::*;
 use std::tx::tx_script_data;
 use std::option::*;
 use std::revert::*;
+use std::vec::*;
 use buf::*;
 use contract_call::*;
-
-fn null_of<T>() -> T {
-    asm(r1: __size_of::<T>()) {
-        aloc r1;
-        addi r1 hp i1;
-        r1: T
-    }
-}
 
 struct MulticallCall {
     contract_id: ContractId,
@@ -28,13 +21,34 @@ struct MulticallCall {
     parameters: CallParameters,
 }
 
-struct ScriptData {
-    calls: [Option<MulticallCall>;
-    5],
+// Ideally this would be `main`, but we need to wrap this with some tricks
+// since we don't have full Vec support.
+fn main_internal(calls: Vec<MulticallCall>) {
+    let mut i = 0;
+    while i < calls.len() {
+        let call = calls.get(i).unwrap();
+    
+        // Make the call
+        call_contract(call.contract_id, call.fn_selector, call.fn_arg, call.parameters);
+        
+        i = i + 1;
+    }
 }
 
-struct ScriptReturn {
-    call_returns: [Option<CallValue>;
+enum ScriptCallValue {
+    Value: u64,
+    Data: (u64, u64),
+}
+
+struct ScriptMulticallCall {
+    contract_id: ContractId,
+    fn_selector: u64,
+    fn_arg: ScriptCallValue,
+    parameters: CallParameters,
+}
+
+struct ScriptData {
+    calls: [Option<ScriptMulticallCall>;
     5],
 }
 
@@ -45,7 +59,38 @@ fn get_var_data() -> Buffer {
     ~Buffer::from_ptr(ptr, len)
 }
 
-fn main(script_data: ScriptData) -> ScriptReturn {
+fn ptr_as_vec<T>(ptr: u64, len: u64) -> Vec<T> {
+    let vec_len = len / size_of::<T>();
+    let vec = (ptr, vec_len, vec_len);
+    let vec_ptr = addr_of(vec);
+    read(vec_ptr)
+}
+
+fn val_as_vec<T, U>(val: T) -> Vec<U> {
+    ptr_as_vec(addr_of(val), size_of_val(val))
+}
+
+fn buf_addr_of_vec<T>(vec: Vec<T>) -> u64 {
+    read(addr_of(vec))
+}
+
+fn mem_to_vec(ptr: u64, len: u64) -> Vec<u64> {
+    // Calculate capacity, with padding if needed
+    let item_len = size_of::<u64>();
+    let pad = len % item_len;
+    let cap = (len + pad) / item_len;
+
+    // Allocate a vec
+    let vec: Vec<u64> = ~Vec::with_capacity(cap);
+
+    // Copy from memory to vec
+    let vec_buf_ptr: u64 = buf_addr_of_vec(vec);
+    copy(ptr, vec_buf_ptr, len);
+
+    vec
+}
+
+fn main(script_data: ScriptData) {
     // TODO: Remove this line when the bug is fixed: https://github.com/FuelLabs/sway/issues/1585
     asm(r1: 0x0000000000000000000000000000000000000000000000000000000000000000) {
     };
@@ -57,59 +102,39 @@ fn main(script_data: ScriptData) -> ScriptReturn {
     let script_data = tx_script_data::<ScriptData>();
     let var_data = get_var_data();
 
-    let mut call_returns: [Option<CallValue>;
-    5] = null_of::<[Option<CallValue>;
-    5]>();
-    let mut ret_data = ~Buffer::new();
+    // Turn slots into calls
+    let call_slots: Vec<Option<ScriptMulticallCall>> = val_as_vec(script_data.calls);
+    let mut calls: Vec<MulticallCall> = ~Vec::with_capacity(call_slots.len());
     let mut i = 0;
-    let calls_len = size_of_val(script_data.calls) / size_of::<Option<MulticallCall>>();
-    while i < calls_len {
-        match script_data.calls[i] {
+    while i < call_slots.len() {
+        match call_slots.get(i).unwrap() {
             Option::Some(call) => {
                 // Prepare the arg
                 let fn_arg = match call.fn_arg {
-                    CallValue::Value(val) => CallValue::Value(val), CallValue::Data((offset, len)) => CallValue::Data((var_data.ptr() + offset, len)), 
+                    ScriptCallValue::Value(val) => CallValue::Value(val), ScriptCallValue::Data((offset, len)) => {
+                        let ptr = var_data.ptr() + offset;
+                        let vec = mem_to_vec(ptr, len);
+                        CallValue::Data(vec)}, 
                 };
 
-                // Make the call
-                let result = call_contract(call.contract_id, call.fn_selector, fn_arg, call.parameters);
-
-                // Process the result
-                let fn_ret = match result {
-                    CallValue::Value(value) => CallValue::Value(value), CallValue::Data((ptr, len)) => {
-                        let buf = ~Buffer::from_ptr(ptr, len);
-                        let offset = ret_data.extend_from_buf(buf);
-                        CallValue::Data((offset, len))
-                    },
+                let call = MulticallCall {
+                    contract_id: call.contract_id,
+                    fn_selector: call.fn_selector,
+                    fn_arg: fn_arg,
+                    parameters: call.parameters,
                 };
-
-                // call_returns[i] = Option::Some(fn_ret);
-                let val: Option<CallValue> = Option::Some(fn_ret);
-                write(addr_of(call_returns[i]), val);
+                calls.push(call);
             },
             _ => {
-                // call_returns[i] = Option::None;
-                let val: Option<CallValue> = Option::None;
-                write(addr_of(call_returns[i]), val);
-            },
+                // break
+                i = call_slots.len();
+            }
         }
 
         // Iterate
         i = i + 1;
     };
 
-    let script_ret = ScriptReturn {
-        call_returns
-    };
-
-    let mut buf = ~Buffer::new();
-    buf.extend_from_ptr(addr_of(script_ret), size_of_val(script_ret));
-    buf.extend_from_buf(ret_data);
-
-    asm(ptr: buf.ptr(), len: buf.len()) {
-        retd ptr len;
-    }
-
-    // unreachable
-    script_ret
+    // Call the actual main
+    main_internal(calls);
 }
