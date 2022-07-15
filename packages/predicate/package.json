@@ -18,7 +18,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "pnpm build-test-predicate && tsup --dts --env.BUILD_VERSION $BUILD_VERSION",
+    "prebuild": "pnpm build-test-predicate",
+    "build": "tsup --dts --env.BUILD_VERSION $BUILD_VERSION",
     "build-test-predicate": "./scripts/build.sh"
   },
   "license": "Apache-2.0",
